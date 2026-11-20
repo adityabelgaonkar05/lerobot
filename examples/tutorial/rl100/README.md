@@ -6,8 +6,7 @@ Policy. It follows the scalar IQL advantage and per-action-step likelihood ratio
 of the [official 2D chunk recipe](https://github.com/Lei-Kun/RL-100/blob/6b6afceb7eb12525398207b5d6e66908863dc385/scripts/Diffusion/Offline/2D/train_policy_image_unet_chunk_two_stage.sh).
 It uses stochastic DDIM transitions during post-training and stock DDIM
 inference (`eta=0`) for the exported policy. The recipe covers offline
-post-training. Online interaction, learned dynamics, behavior-policy refresh,
-consistency distillation and point clouds are separate extensions.
+post-training and includes a separate online PushT experiment.
 
 ## Dataset and policy
 
@@ -74,6 +73,26 @@ unchanged dataset for an exact continuation.
 uv sync --locked --extra dataset --extra diffusion --extra test
 uv run pytest tests/rl/test_rl100_offline_update.py tests/rl/test_rl100_offline_recipe.py
 ```
+
+## Online PushT experiment
+
+The online recipe runs one episode per simulator slot per round. Each round
+holds the actor fixed during collection, fits a value head and updates the
+denoiser against the stored chains, then collects with the updated actor.
+Time limits bootstrap from the last observation history while ending the GAE
+trace. Short final chunks contribute only their executed action positions.
+
+```bash
+uv run python -m examples.tutorial.rl100.train_online \
+  --policy_path=outputs/pusht_rl100/pretrained_model \
+  --output_dir=outputs/pusht_rl100_online --device=cuda \
+  --num_envs=4 --rounds=5 --epochs=2 --env_seed=20000
+```
+
+The output includes the native policy checkpoint and per-round rewards, episode
+lengths, success flags, and update metrics in `rollout_metrics.json`. Use a
+separate `lerobot-eval` run with held-out seeds to assess the exported policy
+under the stock DDIM sampler.
 
 See [RL-100: Performant Robotic Manipulation with Real-World Reinforcement
 Learning](https://arxiv.org/abs/2510.14830v4) for the original method and benchmarks.
