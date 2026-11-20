@@ -48,6 +48,7 @@ class OfflineRL100Config:
     dataset_root: Path | None = None
     dataset_revision: str | None = None
     done_is_termination: bool = False
+    trailing_observation: bool = False
     device: str = "cpu"
     seed: int = 42
     batch_size: int = 16
@@ -81,6 +82,9 @@ def checkpoint_settings(cfg: OfflineRL100Config, dataset: DecisionDataset) -> di
     settings["dataset_info_hash"] = hashlib.sha256(
         (dataset.dataset.root / "meta" / "info.json").read_bytes()
     ).hexdigest()
+    # Preserve resume compatibility for checkpoints created before trailing rows were supported.
+    if not cfg.trailing_observation:
+        del settings["trailing_observation"]
     return settings
 
 
@@ -147,6 +151,7 @@ def train(cfg: OfflineRL100Config) -> None:
         policy_config,
         cfg.gamma,
         cfg.done_is_termination,
+        cfg.trailing_observation,
     )
     settings = checkpoint_settings(cfg, dataset)
 

@@ -50,7 +50,8 @@ def test_full_chunks_respect_episode_and_done_boundaries(with_truncation, trust_
 
 
 @pytest.fixture
-def tiny_dataset(tmp_path):
+def tiny_dataset(tmp_path, request):
+    trailing_observation = getattr(request, "param", False)
     repo_id = "test/rl100-fixture"
     root = tmp_path / "dataset"
     dataset = LeRobotDataset.create(
@@ -70,14 +71,16 @@ def tiny_dataset(tmp_path):
     for episode, length in enumerate((5, 4)):
         for frame in range(length):
             value = episode * 10 + frame
+            last_action = length - 2 if trailing_observation else length - 1
+            boundary = frame >= last_action
             dataset.add_frame(
                 {
                     OBS_IMAGE: np.full((32, 32, 3), value, dtype=np.uint8),
                     OBS_STATE: np.array([value, -value], dtype=np.float32),
                     ACTION: np.array([value, value + 1], dtype=np.float32),
-                    REWARD: np.array([frame + 1], dtype=np.float32),
-                    DONE: np.array([frame == length - 1]),
-                    TRUNCATED: np.array([episode == 1 and frame == length - 1]),
+                    REWARD: np.array([min(frame, last_action) + 1], dtype=np.float32),
+                    DONE: np.array([boundary]),
+                    TRUNCATED: np.array([episode == 1 and boundary]),
                     "task": "Test a reward-labeled offline trajectory",
                 }
             )
@@ -123,6 +126,19 @@ def test_decision_dataset_aligns_observations_actions_and_rewards(tiny_dataset):
     assert terminal["reward"].item() == pytest.approx(6.5)
     assert terminal["discount"].item() == 0.0
     assert all(sample["action"][0, 0] != 12 for sample in decisions)
+
+
+@pytest.mark.parametrize("tiny_dataset", [True], indirect=True)
+def test_trailing_observation_is_never_used_as_an_action(tiny_dataset):
+    dataset, config = tiny_dataset
+    with pytest.raises(ValueError, match="only at the end"):
+        DecisionDataset(dataset.repo_id, dataset.root, None, config, 0.5, False)
+    decisions = DecisionDataset(dataset.repo_id, dataset.root, None, config, 0.5, False, True)
+    assert decisions.anchors.tolist() == [0, 1, 2, 5]
+    terminal = decisions[2]
+    torch.testing.assert_close(terminal["action"][:, 0], torch.tensor([2.0, 3.0]))
+    assert terminal["reward"].item() == pytest.approx(5.0)
+    assert terminal["discount"].item() == 0.0
 
 
 def test_offline_cli_exports_policy_and_resumes_exactly(tmp_path, tiny_dataset):

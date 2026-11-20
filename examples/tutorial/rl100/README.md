@@ -20,6 +20,13 @@ true termination. Short chunks, truncated chunks and live chunks without a
 recorded successor are excluded. Observation history at the beginning of an
 episode uses LeRobot's standard padding.
 
+Use `--trailing_observation=true` for the pinned PushT dataset. The
+[PushT converter](https://github.com/huggingface/lerobot/blob/3c0a209/lerobot/common/datasets/push_dataset_to_hub/pusht_zarr_format.py#L153-L204)
+shifts rewards and flags to the preceding action and repeats the last reward
+and done flag on the final observation. The recipe validates this suffix and
+excludes the final row as an action. PushT's done flags mark the recording end,
+so leave `done_is_termination` at its conservative default.
+
 Start with a local LeRobot Diffusion Policy checkpoint that includes both
 processors. Its input/output features and action units must match the logged
 dataset. Use epsilon prediction, DDIM and at least two reverse steps.
@@ -47,6 +54,7 @@ uv run python -m examples.tutorial.rl100.train_offline \
   --dataset_revision=7628202a2180972f291ba1bc6723834921e72c19 \
   --policy_path=outputs/pusht_bc/checkpoints/last/pretrained_model \
   --output_dir=outputs/pusht_rl100 --device=cuda \
+  --trailing_observation=true \
   --critic_steps=1000 --actor_steps=200
 
 uv run lerobot-eval --env.type=pusht --eval.n_episodes=50 \

@@ -38,7 +38,12 @@ class DecisionTransition(TypedDict):
 
 
 def full_chunk_indices(
-    episodes: Tensor, done: Tensor, truncated: Tensor | None, chunk_size: int, done_is_termination: bool
+    episodes: Tensor,
+    done: Tensor,
+    truncated: Tensor | None,
+    chunk_size: int,
+    done_is_termination: bool,
+    observation_only: Tensor | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Return full-chunk anchors and their terminal flags.
 
@@ -56,6 +61,8 @@ def full_chunk_indices(
 
     episode_windows = episodes.unfold(0, chunk_size, 1)
     same_episode = (episode_windows == episode_windows[:, :1]).all(dim=1)
+    if observation_only is not None:
+        same_episode &= ~observation_only.unfold(0, chunk_size, 1).any(dim=1)
     has_successor = torch.cat((episodes[chunk_size:] == episodes[:-chunk_size], episodes.new_zeros(1).bool()))
     boundary_windows = boundary.unfold(0, chunk_size, 1)
     no_early_boundary = ~boundary_windows[:, :-1].any(dim=1)
@@ -63,6 +70,17 @@ def full_chunk_indices(
     usable_end = terminal | (~boundary_windows[:, -1] & has_successor)
     anchors = (same_episode & no_early_boundary & usable_end).nonzero().flatten()
     return anchors, terminal[anchors]
+
+
+def terminal_observation_rows(episodes: Tensor, boundary: Tensor, rewards: Tensor) -> Tensor:
+    """Find trailing observations in logs that repeat their final transition's flag and reward."""
+    final_row = torch.ones_like(boundary)
+    final_row[:-1] = episodes[:-1] != episodes[1:]
+    previous_same_episode = torch.cat((boundary.new_zeros(1), ~final_row[:-1]))
+    matches_previous = torch.cat((boundary.new_zeros(1), boundary[:-1] & (rewards[1:] == rewards[:-1])))
+    if (final_row & ~(boundary & previous_same_episode & matches_previous)).any():
+        raise ValueError("Expected each trailing observation to repeat the preceding done and reward.")
+    return final_row
 
 
 class DecisionDataset(Dataset[DecisionTransition]):
@@ -76,6 +94,7 @@ class DecisionDataset(Dataset[DecisionTransition]):
         config: DiffusionConfig,
         gamma: float,
         done_is_termination: bool,
+        trailing_observation: bool = False,
     ):
         meta = LeRobotDatasetMetadata(repo_id=repo_id, root=root, revision=revision)
         missing = {REWARD, DONE} - meta.features.keys()
@@ -107,12 +126,19 @@ class DecisionDataset(Dataset[DecisionTransition]):
         columns = ["episode_index", DONE]
         if TRUNCATED in meta.features:
             columns.append(TRUNCATED)
+        if trailing_observation:
+            columns.append(REWARD)
         rows = self.dataset.hf_dataset.select_columns(columns).with_format("torch")[:]
         episodes = rows["episode_index"].flatten()
         done = rows[DONE].flatten().bool()
         truncated = rows[TRUNCATED].flatten().bool() if TRUNCATED in rows else None
         boundary = done if truncated is None else done | truncated
-        if (boundary[:-1] & (episodes[:-1] == episodes[1:])).any():
+        observation_only = None
+        interior = episodes[:-1] == episodes[1:]
+        if trailing_observation and len(episodes):
+            observation_only = terminal_observation_rows(episodes, boundary, rows[REWARD].flatten())
+            interior &= ~observation_only[1:]
+        if (boundary[:-1] & interior).any():
             raise ValueError("Done or truncated flags must appear only at the end of an episode.")
         self.anchors, self.terminal = full_chunk_indices(
             episodes,
@@ -120,6 +146,7 @@ class DecisionDataset(Dataset[DecisionTransition]):
             truncated,
             chunk_size,
             done_is_termination,
+            observation_only,
         )
         if len(self.anchors) == 0:
             raise ValueError("The dataset contains no usable full action chunks.")
