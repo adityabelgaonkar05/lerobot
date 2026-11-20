@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import subprocess
+import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -119,3 +123,84 @@ def test_decision_dataset_aligns_observations_actions_and_rewards(tiny_dataset):
     assert terminal["reward"].item() == pytest.approx(6.5)
     assert terminal["discount"].item() == 0.0
     assert all(sample["action"][0, 0] != 12 for sample in decisions)
+
+
+def test_offline_cli_exports_policy_and_resumes_exactly(tmp_path, tiny_dataset):
+    pytest.importorskip("diffusers", reason="install lerobot[diffusion] to run RL-100 training")
+    from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
+    from lerobot.policies.factory import get_policy_class, make_pre_post_processors
+
+    dataset, config = tiny_dataset
+    decisions = DecisionDataset(
+        dataset.repo_id, dataset.root, None, config, gamma=0.99, done_is_termination=False
+    )
+    policy = DiffusionPolicy(config)
+    preprocessor, postprocessor = make_pre_post_processors(config, dataset_stats=dataset.meta.stats)
+    batch = decisions[1]
+    bc_batch = {
+        **{key: value.unsqueeze(0) for key, value in batch["observation"].items()},
+        ACTION: torch.cat((batch["action"][:1], batch["action"], batch["action"][-1:])).unsqueeze(0),
+        "action_is_pad": torch.zeros(1, config.horizon, dtype=torch.bool),
+    }
+    loss, _ = policy.eval()(preprocessor(bc_batch))
+    optimizer = torch.optim.Adam(policy.parameters(), lr=1e-4)
+    loss.backward()
+    optimizer.step()
+    initial = tmp_path / "bc"
+    policy.save_pretrained(initial)
+    preprocessor.save_pretrained(initial)
+    postprocessor.save_pretrained(initial)
+
+    def run(output: Path, actor_steps: int, source_option: str, source: Path):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "examples.tutorial.rl100.train_offline",
+                f"--dataset_repo_id={dataset.repo_id}",
+                f"--dataset_root={dataset.root}",
+                f"--output_dir={output}",
+                f"--{source_option}={source}",
+                f"--actor_steps={actor_steps}",
+                "--critic_steps=2",
+                "--batch_size=2",
+                "--critic_hidden_dim=8",
+                "--actor_lr=0.0001",
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    partial, resumed, uninterrupted = (tmp_path / name for name in ("partial", "resumed", "uninterrupted"))
+    run(partial, 1, "policy_path", initial)
+    run(resumed, 2, "resume_from", partial)
+    run(uninterrupted, 2, "policy_path", initial)
+
+    policy_class = get_policy_class("diffusion")
+    resumed_policy = policy_class.from_pretrained(resumed / "pretrained_model", strict=True)
+    uninterrupted_policy = policy_class.from_pretrained(uninterrupted / "pretrained_model", strict=True)
+    before = policy.state_dict()
+    after = resumed_policy.state_dict()
+    assert any(not torch.equal(value, before[key]) for key, value in after.items() if ".unet." in key)
+    training_state = torch.load(resumed / "training_state.pt", weights_only=True)
+    for key, value in policy.diffusion.unet.state_dict().items():
+        torch.testing.assert_close(training_state["reference"][key], value, rtol=0, atol=0)
+    for key, value in uninterrupted_policy.state_dict().items():
+        torch.testing.assert_close(after[key], value, rtol=0, atol=0)
+        if ".rgb_encoder." in key:
+            torch.testing.assert_close(after[key], before[key], rtol=0, atol=0)
+
+    export = resumed / "pretrained_model"
+    loaded_pre, loaded_post = make_pre_post_processors(resumed_policy.config, pretrained_path=export)
+    observation = {key: value.unsqueeze(0) for key, value in batch["observation"].items()}
+    noise = torch.zeros(1, config.horizon, 2)
+    actual = loaded_post(resumed_policy.predict_action_chunk(loaded_pre(observation), noise=noise))
+    expected = postprocessor(
+        uninterrupted_policy.predict_action_chunk(preprocessor(observation), noise=noise)
+    )
+    assert actual.shape == (1, config.n_action_steps, 2)
+    torch.testing.assert_close(actual, expected)

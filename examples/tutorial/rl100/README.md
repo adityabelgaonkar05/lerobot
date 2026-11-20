@@ -1,0 +1,71 @@
+# Offline RL-100 with LeRobot Diffusion Policy
+
+This example fits implicit Q-learning critics on logged action chunks, then runs a
+fixed-reference denoising policy-gradient update on a standard LeRobot Diffusion
+Policy. It follows the scalar IQL advantage and per-action-step likelihood ratios
+of the [official 2D chunk recipe](https://github.com/Lei-Kun/RL-100/blob/6b6afceb7eb12525398207b5d6e66908863dc385/scripts/Diffusion/Offline/2D/train_policy_image_unet_chunk_two_stage.sh).
+It uses stochastic DDIM transitions during post-training and stock DDIM
+inference (`eta=0`) for the exported policy. The recipe covers offline
+post-training. Online interaction, learned dynamics, behavior-policy refresh,
+consistency distillation and point clouds are separate extensions.
+
+## Dataset and policy
+
+Use a LeRobot v3 Parquet dataset with one RGB camera, robot state, actions, and
+scalar `next.reward` and `next.done` fields aligned to each executed action.
+Use `next.truncated` to distinguish time limits when available. When the field is
+absent, the recipe drops chunks ending on an ambiguous done unless you set
+`--done_is_termination=true` for a dataset whose done flags unambiguously mean
+true termination. Short chunks, truncated chunks and live chunks without a
+recorded successor are excluded. Observation history at the beginning of an
+episode uses LeRobot's standard padding.
+
+Start with a local LeRobot Diffusion Policy checkpoint that includes both
+processors. Its input/output features and action units must match the logged
+dataset. Use epsilon prediction, DDIM and at least two reverse steps.
+
+## Train and evaluate
+
+From the LeRobot checkout, install the training, diffusion and PushT extras.
+Use CUDA for a full image-policy run, or CPU for a small smoke run. The
+following is a reproducible starting configuration for an experiment. The
+example does not establish a PushT success rate or an improvement over BC.
+
+```bash
+uv sync --locked --extra training --extra diffusion --extra pusht
+
+uv run lerobot-train \
+  --dataset.repo_id=lerobot/pusht \
+  --dataset.revision=7628202a2180972f291ba1bc6723834921e72c19 \
+  --policy.type=diffusion --policy.noise_scheduler_type=DDIM \
+  --policy.n_obs_steps=2 --policy.horizon=16 --policy.n_action_steps=8 \
+  --policy.num_inference_steps=10 --policy.push_to_hub=false \
+  --policy.device=cuda --steps=10000 --output_dir=outputs/pusht_bc
+
+uv run python -m examples.tutorial.rl100.train_offline \
+  --dataset_repo_id=lerobot/pusht \
+  --dataset_revision=7628202a2180972f291ba1bc6723834921e72c19 \
+  --policy_path=outputs/pusht_bc/checkpoints/last/pretrained_model \
+  --output_dir=outputs/pusht_rl100 --device=cuda \
+  --critic_steps=1000 --actor_steps=200
+
+uv run lerobot-eval --env.type=pusht --eval.n_episodes=50 \
+  --policy.path=outputs/pusht_rl100/pretrained_model --policy.device=cuda
+```
+
+Use the same evaluation settings and seeds for the original BC checkpoint.
+For a local dataset, pass its v3 directory using `--dataset_root`.
+Each successful run saves a native checkpoint under `pretrained_model/` and a
+separate local `training_state.pt`. To continue the same fixed-reference actor
+phase, pass `--resume_from` with the run directory in place of `--policy_path`,
+keep the dataset and training settings fixed, choose a new output directory,
+and increase the total `--actor_steps`. Use the same software stack and the same
+unchanged dataset for an exact continuation.
+
+```bash
+uv sync --locked --extra dataset --extra diffusion --extra test
+uv run pytest tests/rl/test_rl100_offline_update.py tests/rl/test_rl100_offline_recipe.py
+```
+
+See [RL-100: Performant Robotic Manipulation with Real-World Reinforcement
+Learning](https://arxiv.org/abs/2510.14830v4) for the original method and benchmarks.
