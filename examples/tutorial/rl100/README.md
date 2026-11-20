@@ -142,5 +142,29 @@ Evaluate the student and teacher on identical simulator seeds. The student
 checkpoint has one inference step and uses sample prediction. Start any
 additional PPO training from the multi-step teacher checkpoint.
 
+## AM-Q calibration experiment
+
+Compare the post-trained actor with the BC actor it started from. Both actors
+use the same frozen encoder, processors, DDIM schedule, starting observations,
+initial noise, reverse-step noise, and sampled dynamics ensemble members.
+The experiment fits a chunk critic and residual feature dynamics on episode
+splits, then reports average imagined min-Q alongside returns from matched
+stochastic PushT rollouts. It also reports held-out dynamics error and the
+error of predicting that features stay unchanged.
+
+```bash
+uv run python -m examples.tutorial.rl100.amq \
+  --dataset_repo_id=lerobot/pusht \
+  --dataset_revision=7628202a2180972f291ba1bc6723834921e72c19 \
+  --trailing_observation=true \
+  --reference_path=outputs/pusht_bc/checkpoints/last/pretrained_model \
+  --candidate_path=outputs/pusht_rl100/pretrained_model \
+  --output_file=outputs/pusht_rl100/amq.json
+```
+
+The score averages estimated values along a fixed-length imagined rollout.
+Only the simulator comparison measures returns. Review paired agreement before
+using a score to promote a reference actor.
+
 See [RL-100: Performant Robotic Manipulation with Real-World Reinforcement
 Learning](https://arxiv.org/abs/2510.14830v4) for the original method and benchmarks.

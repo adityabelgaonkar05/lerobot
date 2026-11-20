@@ -137,13 +137,13 @@ class DenoisingPPO:
         return loss, metrics
 
 
-def make_critic_head(input_dim: int | None, hidden_dim: int) -> nn.Sequential:
+def make_critic_head(input_dim: int | None, hidden_dim: int, output_dim: int = 1) -> nn.Sequential:
     return nn.Sequential(
         nn.Linear(input_dim, hidden_dim) if input_dim is not None else nn.LazyLinear(hidden_dim),
         nn.ReLU(),
         nn.Linear(hidden_dim, hidden_dim),
         nn.ReLU(),
-        nn.Linear(hidden_dim, 1),
+        nn.Linear(hidden_dim, output_dim),
     )
 
 
@@ -196,7 +196,10 @@ class ChunkCritic(nn.Module):
     @torch.no_grad()
     def advantage(self, features: Tensor, action: Tensor) -> Tensor:
         """Evaluate the same action that will receive the actor gradient."""
-        return self._q_values(self.q, features, action).amin(dim=-1, keepdim=True) - self.value(features)
+        return self.min_q(features, action) - self.value(features)
+
+    def min_q(self, features: Tensor, action: Tensor) -> Tensor:
+        return self._q_values(self.q, features, action).amin(dim=-1, keepdim=True)
 
     @torch.no_grad()
     def update_target(self, tau: float) -> None:

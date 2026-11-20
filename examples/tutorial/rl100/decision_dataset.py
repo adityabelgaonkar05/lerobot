@@ -150,6 +150,7 @@ class DecisionDataset(Dataset[DecisionTransition]):
         )
         if len(self.anchors) == 0:
             raise ValueError("The dataset contains no usable full action chunks.")
+        self.episode_ids = episodes[self.anchors]
         logging.info(
             "Using %d full chunks (%d terminal); excluded %d anchors.",
             len(self.anchors),
