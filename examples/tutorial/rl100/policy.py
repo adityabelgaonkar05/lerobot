@@ -26,6 +26,10 @@ from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.factory import make_pre_post_processors
 from lerobot.processor import PolicyAction, PolicyProcessorPipeline
+from lerobot.processor.relative_action_processor import (
+    AbsoluteActionsProcessorStep,
+    RelativeActionsProcessorStep,
+)
 from lerobot.utils.constants import OBS_IMAGES
 
 from .offline_update import DenoisingPPO, DenoisingTransition
@@ -48,6 +52,12 @@ class RL100Policy:
             raise ValueError("RL-100 expects a LeRobot Diffusion Policy checkpoint.")
         if config.compile_model:
             raise ValueError("Use a checkpoint with compile_model disabled for RL-100 post-training.")
+        if min(config.n_obs_steps, config.horizon, config.n_action_steps) < 1:
+            raise ValueError("RL-100 requires positive observation, action, and horizon lengths.")
+        start = config.n_obs_steps - 1
+        action_slice = slice(start, start + config.n_action_steps)
+        if action_slice.stop > config.horizon:
+            raise ValueError("The executed action positions extend past the diffusion horizon.")
         images = config.image_features
         if len(images) != 1 or any(feature.shape[:1] != (3,) for feature in images.values()):
             raise ValueError("This recipe expects exactly one RGB camera.")
@@ -56,10 +66,6 @@ class RL100Policy:
         policy = DiffusionPolicy.from_pretrained(path, config=config, strict=True)
         policy.requires_grad_(False)
         denoiser = policy.diffusion.unet.requires_grad_(True)
-        start = config.n_obs_steps - 1
-        action_slice = slice(start, start + config.n_action_steps)
-        if action_slice.stop > config.horizon:
-            raise ValueError("The executed action positions extend past the diffusion horizon.")
         ppo = DenoisingPPO(
             policy.diffusion.noise_scheduler,
             policy.diffusion.num_inference_steps,
@@ -72,6 +78,11 @@ class RL100Policy:
             pretrained_path=path,
             preprocessor_overrides={"device_processor": {"device": str(device)}},
         )
+        if any(
+            isinstance(step, (RelativeActionsProcessorStep, AbsoluteActionsProcessorStep)) and step.enabled
+            for step in (*preprocessor.steps, *postprocessor.steps)
+        ):
+            raise ValueError("RL-100 expects absolute actions with stateless action processors.")
         return cls(policy, denoiser, ppo, preprocessor, postprocessor)
 
     @torch.no_grad()

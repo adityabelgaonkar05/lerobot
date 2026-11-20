@@ -14,6 +14,7 @@
 
 import subprocess
 import sys
+from os import utime
 from pathlib import Path
 from shutil import copytree
 
@@ -149,6 +150,7 @@ def test_offline_samples_accumulated_sources_without_reusing_roots(tmp_path, tin
         checkpoint_settings,
         load_decision_sources,
         sample_indices,
+        validate_resume_settings,
     )
 
     dataset, policy = tiny_dataset
@@ -165,12 +167,49 @@ def test_offline_samples_accumulated_sources_without_reusing_roots(tmp_path, tin
     indices = sample_indices(len(demo) + len(rollout), len(demo), 4, 1.0, torch.Generator().manual_seed(1))
     assert (indices >= len(demo)).all()
     assert (indices < len(demo) + len(rollout)).all()
-    assert checkpoint_settings(cfg, [demo, rollout])["rollout_datasets"][0]["dataset_root"] == str(
-        new_root.resolve()
-    )
+    settings = checkpoint_settings(cfg, [demo, rollout])
+    assert settings["rollout_datasets"][0]["dataset_root"] == str(new_root.resolve())
+    rollout_path = new_root / rollout.dataset.meta.get_data_file_path(0)
+    stamp = rollout_path.stat()
+    utime(rollout_path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 1_000_000_000))
+    changed = checkpoint_settings(cfg, [demo, rollout])
+    with pytest.raises(ValueError, match="dataset files differ"):
+        validate_resume_settings(settings, changed)
+    legacy = {key: value for key, value in settings.items() if key != "source_file_stamps"}
+    validate_resume_settings(legacy, changed)
     cfg.rollout_roots = [dataset.root]
     with pytest.raises(ValueError, match="distinct root"):
         load_decision_sources(cfg, policy)
+    cfg.rollout_roots = [tmp_path / "missing"]
+    with pytest.raises(ValueError, match="local LeRobot rollout dataset"):
+        load_decision_sources(cfg, policy)
+
+
+def test_policy_rejects_empty_action_chunks_before_loading_weights(tmp_path, tiny_dataset):
+    from examples.tutorial.rl100.policy import RL100Policy
+
+    _, config = tiny_dataset
+    config.n_action_steps = 0
+    config.save_pretrained(tmp_path)
+    with pytest.raises(ValueError, match="positive observation, action, and horizon lengths"):
+        RL100Policy.load(tmp_path, torch.device("cpu"), eta=0.5, clip_epsilon=0.2)
+
+
+def test_policy_rejects_relative_action_processors(tmp_path, tiny_dataset):
+    pytest.importorskip("diffusers", reason="install lerobot[diffusion] to run RL-100 training")
+    from examples.tutorial.rl100.policy import RL100Policy
+    from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
+    from lerobot.policies.factory import make_pre_post_processors
+    from lerobot.processor.relative_action_processor import RelativeActionsProcessorStep
+
+    dataset, config = tiny_dataset
+    DiffusionPolicy(config).save_pretrained(tmp_path)
+    pre, post = make_pre_post_processors(config, dataset_stats=dataset.meta.stats)
+    pre.steps = [*pre.steps, RelativeActionsProcessorStep(enabled=True)]
+    pre.save_pretrained(tmp_path)
+    post.save_pretrained(tmp_path)
+    with pytest.raises(ValueError, match="expects absolute actions"):
+        RL100Policy.load(tmp_path, torch.device("cpu"), eta=0.5, clip_epsilon=0.2)
 
 
 def test_offline_cli_exports_policy_and_resumes_exactly(tmp_path, tiny_dataset):

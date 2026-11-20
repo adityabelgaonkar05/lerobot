@@ -29,7 +29,8 @@ so leave `done_is_termination` at its conservative default.
 
 Start with a local LeRobot Diffusion Policy checkpoint that includes both
 processors. Its input/output features and action units must match the logged
-dataset. Use epsilon prediction, DDIM and at least two reverse steps.
+dataset. Use absolute actions, epsilon prediction, DDIM and at least two
+reverse steps.
 
 ## Train and evaluate
 
@@ -68,7 +69,9 @@ separate local `training_state.pt`. To continue the same fixed-reference actor
 phase, pass `--resume_from` with the run directory in place of `--policy_path`,
 keep the dataset and training settings fixed, choose a new output directory,
 and increase the total `--actor_steps`. Use the same software stack and the same
-unchanged dataset for an exact continuation.
+unchanged dataset for an exact continuation. Resume checks the paths, sizes,
+and modification times of the source files. Older checkpoints check the dataset
+paths and `meta/info.json` hashes.
 
 ```bash
 uv sync --locked --extra dataset --extra diffusion --extra test

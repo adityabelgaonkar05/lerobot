@@ -93,6 +93,9 @@ def load_decision_sources(cfg: OfflineRL100Config, policy: DiffusionConfig) -> l
     roots = [primary.dataset.root.resolve(), *(root.resolve() for root in cfg.rollout_roots)]
     if len(set(roots)) != len(roots):
         raise ValueError("Each demonstration or rollout source must have a distinct root.")
+    for root in roots[1:]:
+        if not (root / "meta" / "info.json").is_file():
+            raise ValueError(f"Expected a local LeRobot rollout dataset at {root}.")
     # Native eval recordings end on the final executed action and combine episode end flags.
     return [
         primary,
@@ -103,6 +106,18 @@ def load_decision_sources(cfg: OfflineRL100Config, policy: DiffusionConfig) -> l
             for root in roots[1:]
         ),
     ]
+
+
+def dataset_file_stamp(source: DecisionDataset) -> str:
+    """Fingerprint v3 files by path, size, and modification time without decoding the dataset."""
+    root = source.dataset.root
+    data_paths = [root / path for path in source.dataset.reader.get_episodes_file_paths()]
+    meta_paths = [path for path in (root / "meta").rglob("*") if path.suffix in {".json", ".parquet"}]
+    digest = hashlib.sha256()
+    for path in sorted({*data_paths, *meta_paths}):
+        stat = path.stat()
+        digest.update(repr((path.relative_to(root).as_posix(), stat.st_size, stat.st_mtime_ns)).encode())
+    return digest.hexdigest()
 
 
 def checkpoint_settings(cfg: OfflineRL100Config, sources: list[DecisionDataset]) -> dict:
@@ -118,6 +133,7 @@ def checkpoint_settings(cfg: OfflineRL100Config, sources: list[DecisionDataset])
         }
 
     settings.update(dataset_identity(sources[0]))
+    settings["source_file_stamps"] = [dataset_file_stamp(source) for source in sources]
     if len(sources) > 1:
         settings["rollout_datasets"] = [dataset_identity(source) for source in sources[1:]]
     if cfg.rollout_fraction is None:
@@ -128,6 +144,17 @@ def checkpoint_settings(cfg: OfflineRL100Config, sources: list[DecisionDataset])
     if not cfg.trailing_observation:
         del settings["trailing_observation"]
     return settings
+
+
+def validate_resume_settings(saved: dict, current: dict) -> None:
+    if "source_file_stamps" not in saved:
+        # Old checkpoints recorded the locations and info.json hashes only.
+        current = {key: value for key, value in current.items() if key != "source_file_stamps"}
+        logging.warning(
+            "The resume checkpoint predates dataset file checks. Verify the input files are unchanged."
+        )
+    if saved != current:
+        raise ValueError("Resume training settings or dataset files differ.")
 
 
 def sample_indices(
@@ -202,8 +229,9 @@ def train(cfg: OfflineRL100Config) -> None:
     critic_start, actor_start = 0, 0
     if cfg.resume_from is not None:
         state = torch.load(cfg.resume_from / "training_state.pt", map_location="cpu", weights_only=True)
-        if state["version"] != STATE_VERSION or state["settings"] != settings:
-            raise ValueError("Resume checkpoint version or training settings differ.")
+        if state["version"] != STATE_VERSION:
+            raise ValueError("Resume checkpoint version differs.")
+        validate_resume_settings(state["settings"], settings)
         critic_start, actor_start = state["critic_steps"], state["actor_steps"]
         if cfg.critic_steps != critic_start or cfg.actor_steps <= actor_start:
             raise ValueError("Resume with the same critic_steps and a larger total actor_steps.")
