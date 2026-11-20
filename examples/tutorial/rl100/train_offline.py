@@ -17,19 +17,20 @@
 import hashlib
 import logging
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import torch
 from torch import Tensor
-from torch.utils.data import default_collate
+from torch.utils.data import ConcatDataset, Dataset, default_collate
 
 from lerobot.configs import parser
+from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.utils.constants import ACTION
 from lerobot.utils.utils import init_logging
 
-from .decision_dataset import DecisionDataset
+from .decision_dataset import DecisionDataset, DecisionTransition
 from .offline_update import ChunkCritic, optimize
 from .policy import RL100Policy
 
@@ -46,6 +47,8 @@ class OfflineRL100Config:
     dataset_revision: str | None = None
     done_is_termination: bool = False
     trailing_observation: bool = False
+    rollout_roots: list[Path] = field(default_factory=list)
+    rollout_fraction: float | None = None
     device: str = "cpu"
     seed: int = 42
     batch_size: int = 16
@@ -69,20 +72,70 @@ class OfflineRL100Config:
             raise ValueError("Expected 0 < gamma <= 1 and 0 < target_tau <= 1.")
         if not 0 < self.actor_lr < float("inf") or not 0 < self.critic_lr < float("inf"):
             raise ValueError("Learning rates must be finite and positive.")
+        if self.rollout_fraction is not None and (
+            not self.rollout_roots or not 0 <= self.rollout_fraction <= 1
+        ):
+            raise ValueError("A rollout_fraction in [0, 1] requires at least one rollout root.")
 
 
-def checkpoint_settings(cfg: OfflineRL100Config, dataset: DecisionDataset) -> dict:
+def load_decision_sources(cfg: OfflineRL100Config, policy: DiffusionConfig) -> list[DecisionDataset]:
+    primary = DecisionDataset(
+        cfg.dataset_repo_id,
+        cfg.dataset_root,
+        cfg.dataset_revision,
+        policy,
+        cfg.gamma,
+        cfg.done_is_termination,
+        cfg.trailing_observation,
+    )
+    roots = [primary.dataset.root.resolve(), *(root.resolve() for root in cfg.rollout_roots)]
+    if len(set(roots)) != len(roots):
+        raise ValueError("Each demonstration or rollout source must have a distinct root.")
+    # Native eval recordings end on the final executed action and combine episode end flags.
+    return [
+        primary,
+        *(DecisionDataset("local/rl100-rollout", root, None, policy, cfg.gamma, False) for root in roots[1:]),
+    ]
+
+
+def checkpoint_settings(cfg: OfflineRL100Config, sources: list[DecisionDataset]) -> dict:
     settings = asdict(cfg)
-    for key in ("output_dir", "policy_path", "resume_from", "critic_steps", "actor_steps"):
+    for key in ("output_dir", "policy_path", "resume_from", "critic_steps", "actor_steps", "rollout_roots"):
         del settings[key]
-    settings["dataset_root"] = str(dataset.dataset.root.resolve())
-    settings["dataset_info_hash"] = hashlib.sha256(
-        (dataset.dataset.root / "meta" / "info.json").read_bytes()
-    ).hexdigest()
+
+    def dataset_identity(source: DecisionDataset) -> dict[str, str]:
+        root = source.dataset.root.resolve()
+        return {
+            "dataset_root": str(root),
+            "dataset_info_hash": hashlib.sha256((root / "meta" / "info.json").read_bytes()).hexdigest(),
+        }
+
+    settings.update(dataset_identity(sources[0]))
+    if len(sources) > 1:
+        settings["rollout_datasets"] = [dataset_identity(source) for source in sources[1:]]
+    if cfg.rollout_fraction is None:
+        del settings["rollout_fraction"]
     # Preserve resume compatibility for checkpoints created before trailing rows were supported.
     if not cfg.trailing_observation:
         del settings["trailing_observation"]
     return settings
+
+
+def sample_indices(
+    num_chunks: int,
+    num_demo: int,
+    batch_size: int,
+    rollout_fraction: float | None,
+    generator: torch.Generator,
+) -> Tensor:
+    if rollout_fraction is None:
+        return torch.randint(num_chunks, (batch_size,), generator=generator)
+    rollout_rows = torch.rand(batch_size, generator=generator) < rollout_fraction
+    num_rollout = int(rollout_rows.sum())
+    indices = torch.empty(batch_size, dtype=torch.long)
+    indices[~rollout_rows] = torch.randint(num_demo, (batch_size - num_rollout,), generator=generator)
+    indices[rollout_rows] = torch.randint(num_demo, num_chunks, (num_rollout,), generator=generator)
+    return indices
 
 
 @parser.wrap()
@@ -104,19 +157,16 @@ def train(cfg: OfflineRL100Config) -> None:
     actor = RL100Policy.load(policy_path, device, cfg.ddim_eta, cfg.clip_epsilon)
     denoiser = actor.denoiser
     reference = deepcopy(denoiser).requires_grad_(False)
-    dataset = DecisionDataset(
-        cfg.dataset_repo_id,
-        cfg.dataset_root,
-        cfg.dataset_revision,
-        actor.policy.config,
-        cfg.gamma,
-        cfg.done_is_termination,
-        cfg.trailing_observation,
-    )
-    settings = checkpoint_settings(cfg, dataset)
+    sources = load_decision_sources(cfg, actor.policy.config)
+    dataset: Dataset[DecisionTransition] = ConcatDataset(sources) if cfg.rollout_roots else sources[0]
+    settings = checkpoint_settings(cfg, sources)
+    if cfg.rollout_roots:
+        logging.info("Sampling %d valid chunks from %d independent sources.", len(dataset), len(sources))
 
     def sample_batch() -> dict:
-        indices = torch.randint(len(dataset), (cfg.batch_size,), generator=batch_generator)
+        indices = sample_indices(
+            len(dataset), len(sources[0]), cfg.batch_size, cfg.rollout_fraction, batch_generator
+        )
         return default_collate([dataset[index] for index in indices.tolist()])
 
     def critic_batch(batch: dict) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:

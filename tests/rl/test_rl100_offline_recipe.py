@@ -15,6 +15,7 @@
 import subprocess
 import sys
 from pathlib import Path
+from shutil import copytree
 
 import numpy as np
 import pytest
@@ -139,6 +140,37 @@ def test_trailing_observation_is_never_used_as_an_action(tiny_dataset):
     torch.testing.assert_close(terminal["action"][:, 0], torch.tensor([2.0, 3.0]))
     assert terminal["reward"].item() == pytest.approx(5.0)
     assert terminal["discount"].item() == 0.0
+
+
+def test_accumulated_rollout_source_uses_separate_flags_and_can_be_sampled(tmp_path, tiny_dataset):
+    pytest.importorskip("diffusers", reason="install lerobot[diffusion] to run RL-100 training")
+    from examples.tutorial.rl100.train_offline import (
+        OfflineRL100Config,
+        checkpoint_settings,
+        load_decision_sources,
+        sample_indices,
+    )
+
+    dataset, policy = tiny_dataset
+    new_root = copytree(dataset.root, tmp_path / "rollout")
+    cfg = OfflineRL100Config(
+        dataset.repo_id,
+        tmp_path / "out",
+        policy_path=tmp_path / "initial",
+        dataset_root=dataset.root,
+        rollout_roots=[new_root],
+        rollout_fraction=1.0,
+    )
+    demo, rollout = load_decision_sources(cfg, policy)
+    indices = sample_indices(len(demo) + len(rollout), len(demo), 4, 1.0, torch.Generator().manual_seed(1))
+    assert (indices >= len(demo)).all()
+    assert (indices < len(demo) + len(rollout)).all()
+    assert checkpoint_settings(cfg, [demo, rollout])["rollout_datasets"][0]["dataset_root"] == str(
+        new_root.resolve()
+    )
+    cfg.rollout_roots = [dataset.root]
+    with pytest.raises(ValueError, match="distinct root"):
+        load_decision_sources(cfg, policy)
 
 
 def test_offline_cli_exports_policy_and_resumes_exactly(tmp_path, tiny_dataset):

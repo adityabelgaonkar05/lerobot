@@ -94,5 +94,33 @@ lengths, success flags, and update metrics in `rollout_metrics.json`. Use a
 separate `lerobot-eval` run with held-out seeds to assess the exported policy
 under the stock DDIM sampler.
 
+## Accumulate simulator data for another offline round
+
+Use the native evaluator to record a policy under new training seeds. Recordings
+are independent LeRobot v3 episode logs. `--rollout_roots` adds their chunks to
+the next offline round without modifying the original data. The default samples
+uniformly over all usable chunks. Set `--rollout_fraction` to control the expected
+fraction of sampled chunks from the recordings.
+
+```bash
+uv run lerobot-eval --env.type=pusht --eval.recording=true \
+  --eval.batch_size=1 --eval.n_episodes=12 --seed=21000 \
+  --policy.path=outputs/pusht_rl100/pretrained_model --output_dir=outputs/collect_round1
+
+uv run python -m examples.tutorial.rl100.train_offline \
+  --dataset_repo_id=lerobot/pusht \
+  --dataset_revision=7628202a2180972f291ba1bc6723834921e72c19 \
+  --trailing_observation=true \
+  --rollout_roots='["outputs/collect_round1/recordings/PushT-v0_0"]' \
+  --rollout_fraction=0.25 --policy_path=outputs/pusht_rl100/pretrained_model \
+  --output_dir=outputs/pusht_rl100_round2 --device=cuda
+```
+
+For multi-slot collection, pass each `env_*` dataset as its own root. The
+evaluator stores `next.done` for any episode boundary. The offline recipe
+uses live chunks from these recordings and excludes chunks ending on ambiguous
+done. Save changes to training data for a new round, with the last actor as
+initialization and a newly fitted critic.
+
 See [RL-100: Performant Robotic Manipulation with Real-World Reinforcement
 Learning](https://arxiv.org/abs/2510.14830v4) for the original method and benchmarks.
