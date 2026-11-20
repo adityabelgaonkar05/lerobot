@@ -19,11 +19,13 @@ import pytest
 import torch
 from torch import Tensor, nn
 
-pytest.importorskip("diffusers", reason="install lerobot[diffusion] to run RL-100 update tests")
-
-from diffusers import DDIMScheduler
-
 from examples.tutorial.rl100.offline_update import ChunkCritic, DenoisingPPO
+from lerobot.utils.import_utils import _diffusers_available
+
+if _diffusers_available:
+    from diffusers import DDIMScheduler
+
+requires_diffusers = pytest.mark.skipif(not _diffusers_available, reason="requires lerobot[diffusion]")
 
 
 class FakeDenoiser(nn.Module):
@@ -36,6 +38,7 @@ class FakeDenoiser(nn.Module):
 
 
 @pytest.mark.parametrize("clip_sample", [False, True])
+@requires_diffusers
 def test_chain_matches_ddim_and_unchanged_policy_has_unit_ratios(clip_sample):
     scheduler = DDIMScheduler(num_train_timesteps=12, clip_sample=clip_sample)
     scheduler.set_timesteps(4)
@@ -82,6 +85,7 @@ def test_chain_matches_ddim_and_unchanged_policy_has_unit_ratios(clip_sample):
 
 
 @pytest.mark.parametrize("advantage", [1.0, -1.0])
+@requires_diffusers
 def test_advantage_controls_sample_likelihood(advantage):
     scheduler = DDIMScheduler(num_train_timesteps=8, clip_sample=False)
     ppo = DenoisingPPO(scheduler, 2, slice(1, 3), eta=0.5, clip_epsilon=0.2)
@@ -96,6 +100,7 @@ def test_advantage_controls_sample_likelihood(advantage):
     assert improved_loss.item() < loss.item()
 
 
+@requires_diffusers
 def test_clipping_applies_on_the_advantage_dependent_side():
     ppo = DenoisingPPO(DDIMScheduler(num_train_timesteps=8), 2, slice(0, 2), eta=0.5, clip_epsilon=0.2)
     denoiser = FakeDenoiser()
@@ -109,11 +114,13 @@ def test_clipping_applies_on_the_advantage_dependent_side():
     assert metrics["clip_fraction"] == pytest.approx(1.0)
 
 
+@requires_diffusers
 def test_one_step_sampler_rejected():
     with pytest.raises(ValueError, match="at least two"):
         DenoisingPPO(DDIMScheduler(), 1, slice(0, 1), eta=0.5, clip_epsilon=0.2)
 
 
+@requires_diffusers
 def test_partial_chunk_does_not_optimize_unexecuted_actions():
     ppo = DenoisingPPO(DDIMScheduler(num_train_timesteps=8), 2, slice(1, 3), 0.5, 0.2)
     denoiser = FakeDenoiser()

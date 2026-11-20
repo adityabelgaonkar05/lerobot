@@ -19,12 +19,9 @@ import pytest
 import torch
 from torch import nn
 
-from lerobot.utils.constants import OBS_STATE
-
-pytest.importorskip("diffusers", reason="install lerobot[diffusion] to run RL-100 rollout tests")
-
 from examples.tutorial.rl100.online_rollout import chunk_gae, collect_rollout
 from examples.tutorial.rl100.train_online import OnlineRL100Config, update_actor_and_value
+from lerobot.utils.constants import OBS_STATE
 
 
 def test_chunk_gae_handles_partial_steps_and_separate_episode_flags():

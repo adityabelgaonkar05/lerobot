@@ -12,14 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
 import torch
 
-pytestmark = pytest.mark.dataset
-pytest.importorskip("datasets", reason="install lerobot[dataset] to run RL-100 AM-Q tests")
-pytest.importorskip("diffusers", reason="install lerobot[diffusion] to run RL-100 AM-Q tests")
-
-from examples.tutorial.rl100.amq import amq_score  # noqa: E402
+from examples.tutorial.rl100.amq import amq_score
 
 
 def test_amq_scores_shared_dynamics_member_choices_per_environment():

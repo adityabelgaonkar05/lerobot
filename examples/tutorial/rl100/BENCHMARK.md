@@ -114,11 +114,52 @@ and 4.923 for offline RL-100. The compact pilot establishes that native
 training, export and closed-loop evaluation work. It leaves learning
 benefit unresolved.
 
+For seed 42, 28 of 50 episodes in each arm stayed below 0.01 peak reward.
+The highest peak reward from the offline checkpoint was 0.744. The paired
+mean return differences for offline RL-100 versus extra BC were −0.066,
+−0.039, and −0.658 for seeds 42–44. Episode-pair bootstrap intervals were
+[−0.962, 0.888], [−0.453, 0.347], and [−1.819, 0.240], respectively.
+The intervals condition on each trained checkpoint and use 20,000 resamples
+of the common evaluation seeds.
+
 The training times describe each stage in isolation from its upstream
 checkpoint. Extra BC and RL-100 both start after the BC time in their
 seed's first row. Timing and peak resident memory reflect concurrent
 jobs on the same host. The seed-42 BC log measured the training loop
 duration only and lacked an RSS measurement.
+
+## Larger-policy follow-up
+
+The single-seed follow-up tested whether additional model capacity and initial
+BC training raised success above the pilot's floor. It used the same PushT
+data, action horizon, sampler and post-training budgets, with training seed
+45 and simulator seeds 10100–10149. Use the pilot commands with these changes
+to the initial BC run:
+
+```text
+--policy.device=mps
+--policy.down_dims=[128,256,512]
+--policy.diffusion_step_embed_dim=64
+--policy.spatial_softmax_num_keypoints=16
+--policy.resize_shape=[64,64]
+--policy.scheduler_warmup_steps=150
+--steps=2000 --save_freq=1000 --seed=45
+```
+
+The model had 27.4 million parameters. The 100-step extra BC control,
+offline post-training and evaluation used CPU. Select seed 45 for both
+post-training arms and change the evaluation seed to 10100.
+
+| Checkpoint | Successes | Mean return | Mean peak reward | Training stage (s) | Peak host RSS (MiB) | Evaluation (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| BC | 0/50 | 3.637 | 0.122 | 670.3 | 1117 | 63.6 |
+| Extra BC | 0/50 | 3.801 | 0.131 | 170.5 | 1215 | 102.3 |
+| Offline RL-100 | 0/50 | 3.124 | 0.117 | 608.2 | 1071 | 50.0 |
+
+The offline checkpoint's paired mean return difference versus extra BC was
+−0.677, with a 95% episode-pair bootstrap interval of [−1.898, 0.464].
+The follow-up still had a success floor. A comparison from a reliably
+successful BC checkpoint remains open.
 
 ## Online and distillation ablations
 
@@ -178,3 +219,11 @@ The dynamics fit reduced one-decision feature error relative to persistence
 for all three seeds. The AM-Q direction disagreed with actual returns in
 seed 43. The example leaves promotion to a future experiment with stronger
 policies, additional seeds and a validated calibration criterion.
+
+## Tests
+
+The focused regression run passed 51 tests across the RL-100 examples,
+native simulator, Diffusion processors, and plugin discovery. Four existing
+processor tests required CUDA. In the base tier with the optional dataset and
+Diffusers packages hidden, the pure IQL, GAE, rollout and AM-Q tests ran
+without those dependencies.
