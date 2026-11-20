@@ -16,17 +16,20 @@
 
 import logging
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
-from lerobot.datasets import LeRobotDataset
-from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.utils.constants import ACTION, DONE, REWARD, TRUNCATED
 from lerobot.utils.feature_utils import dataset_to_policy_features
+from lerobot.utils.import_utils import _av_available, _datasets_available, require_package
+
+if TYPE_CHECKING or (_av_available and _datasets_available):
+    from lerobot.datasets import LeRobotDataset
+    from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
 
 
 class DecisionTransition(TypedDict):
@@ -95,7 +98,10 @@ class DecisionDataset(Dataset[DecisionTransition]):
         gamma: float,
         done_is_termination: bool,
         trailing_observation: bool = False,
+        video_backend: str | None = None,
     ):
+        require_package("datasets", extra="dataset")
+        require_package("av", extra="dataset")
         meta = LeRobotDatasetMetadata(repo_id=repo_id, root=root, revision=revision)
         missing = {REWARD, DONE} - meta.features.keys()
         if missing:
@@ -121,7 +127,11 @@ class DecisionDataset(Dataset[DecisionTransition]):
             delta_timestamps[key] = [i / meta.fps for i in range(chunk_size)]
 
         self.dataset = LeRobotDataset(
-            repo_id=repo_id, root=root, revision=revision, delta_timestamps=delta_timestamps
+            repo_id=repo_id,
+            root=root,
+            revision=revision,
+            delta_timestamps=delta_timestamps,
+            video_backend=video_backend,
         )
         columns = ["episode_index", DONE]
         if TRUNCATED in meta.features:

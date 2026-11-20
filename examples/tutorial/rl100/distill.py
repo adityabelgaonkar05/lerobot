@@ -19,21 +19,27 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING
 
 import torch
-from diffusers import DDIMScheduler
 from torch import Tensor, nn
 from torch.nn.functional import mse_loss
 from torch.utils.data import default_collate
 
 from lerobot.configs import parser
-from lerobot.datasets import LeRobotDataset
-from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
 from lerobot.utils.feature_utils import dataset_to_policy_features
+from lerobot.utils.import_utils import _av_available, _datasets_available, require_package
 from lerobot.utils.utils import init_logging
 
 from .offline_update import optimize
 from .policy import RL100Policy
+
+if TYPE_CHECKING:
+    from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+
+if TYPE_CHECKING or (_av_available and _datasets_available):
+    from lerobot.datasets import LeRobotDataset
+    from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
 
 
 @dataclass
@@ -43,6 +49,7 @@ class DistillConfig:
     dataset_repo_id: str
     dataset_root: Path | None = None
     dataset_revision: str | None = None
+    video_backend: str | None = None
     device: str = "cpu"
     seed: int = 42
     batch_size: int = 16
@@ -54,9 +61,9 @@ class DistillConfig:
             raise ValueError("Expected positive steps, batch size, and a finite positive learning rate.")
 
 
-def one_step_scheduler(teacher: DDIMScheduler) -> DDIMScheduler:
+def one_step_scheduler(teacher: "DDIMScheduler") -> "DDIMScheduler":
     """Make stock DDIM return the student's clean-sample prediction in one step."""
-    scheduler = DDIMScheduler.from_config(teacher.config, prediction_type="sample")
+    scheduler = type(teacher).from_config(teacher.config, prediction_type="sample")
     scheduler.set_timesteps(1)
     if scheduler.timesteps.tolist() != [0] or not scheduler.config.set_alpha_to_one:
         raise ValueError(
@@ -84,6 +91,8 @@ def train(cfg: DistillConfig) -> None:
     device = torch.device(cfg.device)
     if device.type not in {"cpu", "cuda"}:
         raise ValueError("The RL-100 example supports CPU and CUDA.")
+    require_package("datasets", extra="dataset")
+    require_package("av", extra="dataset")
     torch.manual_seed(cfg.seed)
     batch_generator = torch.Generator().manual_seed(cfg.seed)
     noise_generator = torch.Generator(device=device).manual_seed(cfg.seed + 1)
@@ -108,6 +117,7 @@ def train(cfg: DistillConfig) -> None:
         root=cfg.dataset_root,
         revision=cfg.dataset_revision,
         delta_timestamps=dict.fromkeys(keys, history),
+        video_backend=cfg.video_backend,
     )
 
     for step in range(cfg.steps):

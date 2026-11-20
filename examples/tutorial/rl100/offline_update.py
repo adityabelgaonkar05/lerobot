@@ -14,13 +14,20 @@
 
 """Chunk IQL and denoising policy gradients for the RL-100 offline recipe."""
 
+from __future__ import annotations
+
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
-from diffusers import DDIMScheduler
 from torch import Tensor, nn
 from torch.nn.functional import mse_loss
+
+from lerobot.utils.import_utils import _diffusers_available, require_package
+
+if TYPE_CHECKING or _diffusers_available:
+    from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 
 @dataclass(frozen=True)
@@ -46,6 +53,7 @@ class DenoisingPPO:
         eta: float,
         clip_epsilon: float,
     ):
+        require_package("diffusers", extra="diffusion")
         if not isinstance(scheduler, DDIMScheduler) or scheduler.config.prediction_type != "epsilon":
             raise ValueError("RL-100 requires an epsilon-prediction DDIM scheduler.")
         if not 2 <= inference_steps <= scheduler.config.num_train_timesteps:

@@ -45,6 +45,7 @@ class OfflineRL100Config:
     resume_from: Path | None = None
     dataset_root: Path | None = None
     dataset_revision: str | None = None
+    video_backend: str | None = None
     done_is_termination: bool = False
     trailing_observation: bool = False
     rollout_roots: list[Path] = field(default_factory=list)
@@ -87,6 +88,7 @@ def load_decision_sources(cfg: OfflineRL100Config, policy: DiffusionConfig) -> l
         cfg.gamma,
         cfg.done_is_termination,
         cfg.trailing_observation,
+        video_backend=cfg.video_backend,
     )
     roots = [primary.dataset.root.resolve(), *(root.resolve() for root in cfg.rollout_roots)]
     if len(set(roots)) != len(roots):
@@ -94,7 +96,12 @@ def load_decision_sources(cfg: OfflineRL100Config, policy: DiffusionConfig) -> l
     # Native eval recordings end on the final executed action and combine episode end flags.
     return [
         primary,
-        *(DecisionDataset("local/rl100-rollout", root, None, policy, cfg.gamma, False) for root in roots[1:]),
+        *(
+            DecisionDataset(
+                "local/rl100-rollout", root, None, policy, cfg.gamma, False, video_backend=cfg.video_backend
+            )
+            for root in roots[1:]
+        ),
     ]
 
 
@@ -115,6 +122,8 @@ def checkpoint_settings(cfg: OfflineRL100Config, sources: list[DecisionDataset])
         settings["rollout_datasets"] = [dataset_identity(source) for source in sources[1:]]
     if cfg.rollout_fraction is None:
         del settings["rollout_fraction"]
+    if cfg.video_backend is None:
+        del settings["video_backend"]
     # Preserve resume compatibility for checkpoints created before trailing rows were supported.
     if not cfg.trailing_observation:
         del settings["trailing_observation"]

@@ -46,6 +46,7 @@ class AMQConfig:
     dataset_repo_id: str
     dataset_root: Path | None = None
     dataset_revision: str | None = None
+    video_backend: str | None = None
     trailing_observation: bool = False
     device: str = "cpu"
     seed: int = 42
@@ -165,6 +166,7 @@ def evaluate(cfg: AMQConfig) -> None:
         cfg.gamma,
         False,
         cfg.trailing_observation,
+        video_backend=cfg.video_backend,
     )
     episodes = dataset.episode_ids.unique()
     if len(episodes) < 2:
