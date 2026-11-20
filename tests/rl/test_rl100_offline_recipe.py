@@ -142,7 +142,7 @@ def test_trailing_observation_is_never_used_as_an_action(tiny_dataset):
     assert terminal["discount"].item() == 0.0
 
 
-def test_accumulated_rollout_source_uses_separate_flags_and_can_be_sampled(tmp_path, tiny_dataset):
+def test_offline_samples_accumulated_sources_without_reusing_roots(tmp_path, tiny_dataset):
     pytest.importorskip("diffusers", reason="install lerobot[diffusion] to run RL-100 training")
     from examples.tutorial.rl100.train_offline import (
         OfflineRL100Config,
@@ -252,3 +252,58 @@ def test_offline_cli_exports_policy_and_resumes_exactly(tmp_path, tiny_dataset):
     )
     assert actual.shape == (1, config.n_action_steps, 2)
     torch.testing.assert_close(actual, expected)
+
+
+def test_distillation_exports_a_native_one_step_checkpoint(tmp_path, tiny_dataset):
+    pytest.importorskip("diffusers", reason="install lerobot[diffusion] to run RL-100 distillation")
+    from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
+    from lerobot.policies.factory import make_pre_post_processors
+
+    dataset, config = tiny_dataset
+    policy = DiffusionPolicy(config).eval()
+    preprocessor, postprocessor = make_pre_post_processors(config, dataset_stats=dataset.meta.stats)
+    initial = tmp_path / "teacher"
+    policy.save_pretrained(initial)
+    preprocessor.save_pretrained(initial)
+    postprocessor.save_pretrained(initial)
+    output = tmp_path / "student"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "examples.tutorial.rl100.distill",
+            f"--dataset_repo_id={dataset.repo_id}",
+            f"--dataset_root={dataset.root}",
+            f"--policy_path={initial}",
+            f"--output_dir={output}",
+            "--steps=2",
+            "--batch_size=2",
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    student = DiffusionPolicy.from_pretrained(output / "pretrained_model", strict=True)
+    assert student.config.prediction_type == "sample"
+    assert student.config.num_inference_steps == 1
+    assert any(
+        not torch.equal(value, policy.diffusion.unet.state_dict()[name])
+        for name, value in student.diffusion.unet.state_dict().items()
+    )
+    for name, value in student.diffusion.rgb_encoder.state_dict().items():
+        torch.testing.assert_close(value, policy.diffusion.rgb_encoder.state_dict()[name])
+    decisions = DecisionDataset(dataset.repo_id, dataset.root, None, config, 0.99, False)
+    observations = {key: value.unsqueeze(0) for key, value in decisions[0]["observation"].items()}
+    pre, post = make_pre_post_processors(student.config, pretrained_path=output / "pretrained_model")
+    predictions = []
+    hook = student.diffusion.unet.register_forward_hook(lambda module, inputs, out: predictions.append(out))
+    with torch.no_grad():
+        action = student.predict_action_chunk(pre(observations), noise=torch.zeros(1, config.horizon, 2))
+    hook.remove()
+    assert len(predictions) == 1
+    start = config.n_obs_steps - 1
+    expected = predictions[0][:, start : start + config.n_action_steps].clamp(-1, 1)
+    torch.testing.assert_close(post(action), postprocessor(expected))

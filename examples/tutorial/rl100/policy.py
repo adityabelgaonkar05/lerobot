@@ -85,14 +85,18 @@ class RL100Policy:
     def sample(
         self, reference: nn.Module, conditioning: Tensor, generator: torch.Generator
     ) -> tuple[Tensor, list[DenoisingTransition]]:
+        return self.ppo.sample(
+            reference, conditioning, self.initial_noise(conditioning, generator), generator
+        )
+
+    def initial_noise(self, conditioning: Tensor, generator: torch.Generator) -> Tensor:
         config = self.policy.config
-        noise = torch.randn(
+        return torch.randn(
             (conditioning.shape[0], config.horizon, config.action_feature.shape[0]),
             device=conditioning.device,
             dtype=conditioning.dtype,
             generator=generator,
         )
-        return self.ppo.sample(reference, conditioning, noise, generator)
 
     def export(self, path: Path) -> None:
         self.policy.save_pretrained(path)

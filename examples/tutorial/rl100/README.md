@@ -122,5 +122,25 @@ uses live chunks from these recordings and excludes chunks ending on ambiguous
 done. Save changes to training data for a new round, with the last actor as
 initialization and a newly fitted critic.
 
+## One-step distillation experiment
+
+Fit a student on the teacher's executed action positions using the same RGB
+history and initial Gaussian noise. The student predicts the clean action
+sample, which makes it deployable in one model call using stock DDIM. This
+experiment uses direct teacher regression. The paper's consistency-model
+objective and target-network schedule are outside this recipe.
+
+```bash
+uv run python -m examples.tutorial.rl100.distill \
+  --dataset_repo_id=lerobot/pusht \
+  --dataset_revision=7628202a2180972f291ba1bc6723834921e72c19 \
+  --policy_path=outputs/pusht_rl100/pretrained_model \
+  --output_dir=outputs/pusht_rl100_student --device=cuda
+```
+
+Evaluate the student and teacher on identical simulator seeds. The student
+checkpoint has one inference step and uses sample prediction. Start any
+additional PPO training from the multi-step teacher checkpoint.
+
 See [RL-100: Performant Robotic Manipulation with Real-World Reinforcement
 Learning](https://arxiv.org/abs/2510.14830v4) for the original method and benchmarks.
