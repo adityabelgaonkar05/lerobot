@@ -42,28 +42,29 @@ def test_chain_matches_ddim_and_unchanged_policy_has_unit_ratios(clip_sample):
     action_slice = slice(1, 3)
     ppo = DenoisingPPO(scheduler, 4, action_slice, eta=0.5, clip_epsilon=0.2)
     denoiser = FakeDenoiser()
+    with torch.no_grad():
+        denoiser.offset.copy_(torch.tensor([0.05, -0.1, 0.2, 0.12]).reshape(1, 4, 1))
     noise = torch.linspace(-2, 2, 16).reshape(4, 4, 1)
     conditioning = torch.zeros(4, 2)
+    epsilon = denoiser.offset.detach().expand_as(noise)
 
     chunk, chain = ppo.sample(denoiser, conditioning, noise, torch.Generator().manual_seed(42))
     generator = torch.Generator().manual_seed(42)
     expected = noise
     for timestep in scheduler.timesteps.tolist():
         step_noise = torch.randn(noise.shape, generator=generator)
-        expected = scheduler.step(
-            torch.zeros_like(expected), timestep, expected, eta=0.5, variance_noise=step_noise
-        ).prev_sample
+        expected = scheduler.step(epsilon, timestep, expected, eta=0.5, variance_noise=step_noise).prev_sample
     torch.testing.assert_close(chunk, expected[:, action_slice])
     assert len(chain) == 3
     first = chain[0]
-    mean = scheduler.step(
-        torch.zeros_like(first.sample),
-        first.timestep,
-        first.sample,
-        eta=0.5,
-        variance_noise=torch.zeros_like(first.sample),
-    ).prev_sample
-    std = ppo.std_by_timestep[first.timestep]
+    # Evaluate the Gaussian coefficients independently of the scheduler's step and variance helpers.
+    alpha = scheduler.alphas_cumprod[9]
+    alpha_prev = scheduler.alphas_cumprod[6]
+    std = 0.5 * ((1 - alpha_prev) / (1 - alpha) * (1 - alpha / alpha_prev)).sqrt()
+    clean = (first.sample - (1 - alpha).sqrt() * epsilon) / alpha.sqrt()
+    if clip_sample:
+        clean = clean.clamp(-1, 1)
+    mean = alpha_prev.sqrt() * clean + (1 - alpha_prev - std.square()).sqrt() * epsilon
     distribution = torch.distributions.Normal(mean[:, action_slice], std)
     torch.testing.assert_close(
         first.old_log_prob,

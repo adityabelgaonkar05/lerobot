@@ -2,8 +2,9 @@
 
 This example fits implicit Q-learning critics on logged action chunks, then runs a
 fixed-reference denoising policy-gradient update on a standard LeRobot Diffusion
-Policy. It follows the scalar IQL advantage and per-action-step likelihood ratios
-of the [official 2D chunk recipe](https://github.com/Lei-Kun/RL-100/blob/6b6afceb7eb12525398207b5d6e66908863dc385/scripts/Diffusion/Offline/2D/train_policy_image_unet_chunk_two_stage.sh).
+Policy. It uses the official 2D implementation's configurable scalar IQL
+advantage and per-action-step likelihood ratio. See the [PushT benchmark and
+reference settings](BENCHMARK.md) for the exact configuration and differences.
 It uses stochastic DDIM transitions during post-training and stock DDIM
 inference (`eta=0`) for the exported policy. The recipe covers offline
 post-training and includes a separate online PushT experiment.
