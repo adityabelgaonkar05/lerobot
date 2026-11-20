@@ -113,6 +113,21 @@ def test_one_step_sampler_rejected():
         DenoisingPPO(DDIMScheduler(), 1, slice(0, 1), eta=0.5, clip_epsilon=0.2)
 
 
+def test_partial_chunk_does_not_optimize_unexecuted_actions():
+    ppo = DenoisingPPO(DDIMScheduler(num_train_timesteps=8), 2, slice(1, 3), 0.5, 0.2)
+    denoiser = FakeDenoiser()
+    conditioning = torch.zeros(1, 2)
+    _, chain = ppo.sample(denoiser, conditioning, torch.zeros(1, 4, 1), torch.Generator().manual_seed(7))
+    transition = chain[0]
+    chain = [replace(transition, old_log_prob=transition.old_log_prob - torch.tensor([[0.0, 10.0]]))]
+    loss, metrics = ppo.loss(denoiser, conditioning, chain, torch.ones(1), torch.tensor([1]))
+    assert loss.item() == pytest.approx(-1.0)
+    assert metrics["clip_fraction"].item() == 0
+    loss.backward()
+    assert denoiser.offset.grad[0, 1] != 0
+    assert denoiser.offset.grad[0, 2] == 0
+
+
 def test_chunk_critic_targets_and_gradient_isolation():
     critic = ChunkCritic(observation_dim=2, action_dim=2, hidden_dim=4, expectile=0.75)
     with torch.no_grad():

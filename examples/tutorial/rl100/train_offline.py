@@ -22,19 +22,16 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import torch
-from torch import Tensor, nn
+from torch import Tensor
 from torch.utils.data import default_collate
 
 from lerobot.configs import parser
-from lerobot.configs.policies import PreTrainedConfig
-from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
-from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
-from lerobot.policies.factory import make_pre_post_processors
-from lerobot.utils.constants import ACTION, OBS_IMAGES
+from lerobot.utils.constants import ACTION
 from lerobot.utils.utils import init_logging
 
 from .decision_dataset import DecisionDataset
-from .offline_update import ChunkCritic, DenoisingPPO
+from .offline_update import ChunkCritic, optimize
+from .policy import RL100Policy
 
 STATE_VERSION = 1
 
@@ -88,15 +85,6 @@ def checkpoint_settings(cfg: OfflineRL100Config, dataset: DecisionDataset) -> di
     return settings
 
 
-def optimize(loss: Tensor, module: nn.Module, optimizer: torch.optim.Optimizer) -> None:
-    if not torch.isfinite(loss):
-        raise RuntimeError("Encountered a non-finite RL-100 loss.")
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    nn.utils.clip_grad_norm_(module.parameters(), max_norm=1.0, error_if_nonfinite=True)
-    optimizer.step()
-
-
 @parser.wrap()
 def train(cfg: OfflineRL100Config) -> None:
     """Fit the offline critics, update a fixed-reference actor, and export a standard policy."""
@@ -113,42 +101,14 @@ def train(cfg: OfflineRL100Config) -> None:
     torch.manual_seed(cfg.seed)
     batch_generator = torch.Generator().manual_seed(cfg.seed)
     noise_generator = torch.Generator(device=device).manual_seed(cfg.seed + 1)
-    policy_config = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=[f"--device={device}"])
-    if not isinstance(policy_config, DiffusionConfig):
-        raise ValueError("RL-100 expects a LeRobot Diffusion Policy checkpoint.")
-    if policy_config.compile_model:
-        raise ValueError("Use a checkpoint with compile_model disabled for RL-100 post-training.")
-    images = policy_config.image_features
-    if len(images) != 1 or any(feature.shape[:1] != (3,) for feature in images.values()):
-        raise ValueError("This recipe expects exactly one RGB camera.")
-    # The checkpoint already contains every vision weight. Avoid downloading the initialization.
-    policy_config.pretrained_backbone_weights = None
-    policy = DiffusionPolicy.from_pretrained(policy_path, config=policy_config, strict=True)
-    policy.requires_grad_(False)
-    denoiser = policy.diffusion.unet.requires_grad_(True)
+    actor = RL100Policy.load(policy_path, device, cfg.ddim_eta, cfg.clip_epsilon)
+    denoiser = actor.denoiser
     reference = deepcopy(denoiser).requires_grad_(False)
-    start = policy_config.n_obs_steps - 1
-    action_steps = policy_config.n_action_steps
-    action_slice = slice(start, start + action_steps)
-    if action_slice.stop > policy_config.horizon:
-        raise ValueError("The executed action positions extend past the diffusion horizon.")
-    ppo = DenoisingPPO(
-        policy.diffusion.noise_scheduler,
-        policy.diffusion.num_inference_steps,
-        action_slice,
-        cfg.ddim_eta,
-        cfg.clip_epsilon,
-    )
-    preprocessor, postprocessor = make_pre_post_processors(
-        policy_cfg=policy_config,
-        pretrained_path=policy_path,
-        preprocessor_overrides={"device_processor": {"device": str(device)}},
-    )
     dataset = DecisionDataset(
         cfg.dataset_repo_id,
         cfg.dataset_root,
         cfg.dataset_revision,
-        policy_config,
+        actor.policy.config,
         cfg.gamma,
         cfg.done_is_termination,
         cfg.trailing_observation,
@@ -159,19 +119,14 @@ def train(cfg: OfflineRL100Config) -> None:
         indices = torch.randint(len(dataset), (cfg.batch_size,), generator=batch_generator)
         return default_collate([dataset[index] for index in indices.tolist()])
 
-    @torch.no_grad()
-    def encode(batch: dict[str, Tensor]) -> Tensor:
-        batch[OBS_IMAGES] = torch.stack([batch[key] for key in policy_config.image_features], dim=-4)
-        return policy.diffusion._prepare_global_conditioning(batch)
-
     def critic_batch(batch: dict) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-        current = preprocessor({**batch["observation"], ACTION: batch["action"]})
-        successor = preprocessor(batch["next_observation"])
+        current = actor.preprocessor({**batch["observation"], ACTION: batch["action"]})
+        successor = actor.preprocessor(batch["next_observation"])
         return (
-            encode(current),
+            actor.encode(current),
             current[ACTION],
             batch["reward"].to(device),
-            encode(successor),
+            actor.encode(successor),
             batch["discount"].to(device),
         )
 
@@ -212,19 +167,12 @@ def train(cfg: OfflineRL100Config) -> None:
                 "Critic step %d | value loss %.5g | Q loss %.5g", step + 1, value_loss.item(), q_loss.item()
             )
 
-    action_dim = actions.shape[-1]
     for step in range(actor_start, cfg.actor_steps):
         batch = sample_batch()
-        features = encode(preprocessor(batch["observation"]))
-        noise = torch.randn(
-            (features.shape[0], policy_config.horizon, action_dim),
-            device=device,
-            dtype=features.dtype,
-            generator=noise_generator,
-        )
-        sampled_actions, chain = ppo.sample(reference, features, noise, noise_generator)
+        features = actor.encode(actor.preprocessor(batch["observation"]))
+        sampled_actions, chain = actor.sample(reference, features, noise_generator)
         advantage = critic.advantage(features, sampled_actions)
-        loss, metrics = ppo.loss(denoiser, features, chain, advantage)
+        loss, metrics = actor.ppo.loss(denoiser, features, chain, advantage)
         optimize(loss, denoiser, optimizers["actor"])
         if step % 100 == 0 or step + 1 == cfg.actor_steps:
             logging.info(
@@ -238,10 +186,7 @@ def train(cfg: OfflineRL100Config) -> None:
     cfg.output_dir.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=cfg.output_dir.parent) as directory:
         staged = Path(directory) / "checkpoint"
-        export = staged / "pretrained_model"
-        policy.save_pretrained(export)
-        preprocessor.save_pretrained(export)
-        postprocessor.save_pretrained(export)
+        actor.export(staged / "pretrained_model")
         torch.save(
             {
                 "version": STATE_VERSION,

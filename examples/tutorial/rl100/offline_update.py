@@ -112,6 +112,7 @@ class DenoisingPPO:
         conditioning: Tensor,
         transitions: list[DenoisingTransition],
         advantage: Tensor,
+        executed_steps: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         """Apply the clipped surrogate to a fixed reference chain and detached chunk advantages."""
         log_ratios = []
@@ -120,15 +121,39 @@ class DenoisingPPO:
             log_prob = self._log_prob(transition.next_sample, mean, self.std_by_timestep[transition.timestep])
             log_ratios.append(log_prob - transition.old_log_prob)
         log_ratio = torch.stack(log_ratios)
+        advantage = advantage.detach().reshape(1, -1, 1).expand_as(log_ratio)
+        if executed_steps is not None:
+            mask = torch.arange(log_ratio.shape[-1], device=log_ratio.device) < executed_steps[:, None]
+            mask = mask.unsqueeze(0).expand_as(log_ratio)
+            log_ratio = log_ratio[mask]
+            advantage = advantage[mask]
         ratio = log_ratio.exp()
         clipped_ratio = ratio.clamp(1 - self.clip_epsilon, 1 + self.clip_epsilon)
-        advantage = advantage.detach().reshape(1, -1, 1)
         loss = -torch.minimum(ratio * advantage, clipped_ratio * advantage).mean()
         metrics = {
             "approx_kl": ((ratio - 1) - log_ratio).detach().mean(),
             "clip_fraction": ((ratio - 1).abs() > self.clip_epsilon).float().mean(),
         }
         return loss, metrics
+
+
+def make_critic_head(input_dim: int | None, hidden_dim: int) -> nn.Sequential:
+    return nn.Sequential(
+        nn.Linear(input_dim, hidden_dim) if input_dim is not None else nn.LazyLinear(hidden_dim),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, hidden_dim),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, 1),
+    )
+
+
+def optimize(loss: Tensor, module: nn.Module, optimizer: torch.optim.Optimizer) -> None:
+    if not torch.isfinite(loss):
+        raise RuntimeError("Encountered a non-finite RL-100 loss.")
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    nn.utils.clip_grad_norm_(module.parameters(), max_norm=1.0, error_if_nonfinite=True)
+    optimizer.step()
 
 
 class ChunkCritic(nn.Module):
@@ -139,20 +164,13 @@ class ChunkCritic(nn.Module):
         if not 0 < expectile < 1:
             raise ValueError("Expected 0 < expectile < 1.")
 
-        def mlp(input_dim: int) -> nn.Sequential:
-            return nn.Sequential(
-                nn.Linear(input_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, 1),
-            )
-
-        self.q = nn.ModuleList(mlp(observation_dim + action_dim) for _ in range(2))
-        self.target_q = nn.ModuleList(mlp(observation_dim + action_dim) for _ in range(2))
+        self.q = nn.ModuleList(make_critic_head(observation_dim + action_dim, hidden_dim) for _ in range(2))
+        self.target_q = nn.ModuleList(
+            make_critic_head(observation_dim + action_dim, hidden_dim) for _ in range(2)
+        )
         self.target_q.load_state_dict(self.q.state_dict())
         self.target_q.requires_grad_(False)
-        self.value = mlp(observation_dim)
+        self.value = make_critic_head(observation_dim, hidden_dim)
         self.expectile = expectile
 
     @staticmethod
